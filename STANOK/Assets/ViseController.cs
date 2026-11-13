@@ -4,6 +4,7 @@ using UnityEngine;
 public class ViseController : MonoBehaviour
 {
     [Header("Vise components")]
+    public Transform viseRoot;
     public Transform movingJaw;
     public Collider movingJawPlate;
     public Collider fixedJawPlate;
@@ -11,6 +12,8 @@ public class ViseController : MonoBehaviour
     [Header("Workpiece")]
     public Transform workpiece;
     public Collider workpieceCollider;
+    public Rigidbody workpieceBody;
+    public ViseMagnetController magnetController;
 
     [Header("Movement")]
     [Min(0.01f)]
@@ -20,24 +23,40 @@ public class ViseController : MonoBehaviour
     public float contactOffset = 0.001f;
 
     [Header("Controls")]
-    public bool enableKeyboardTest = true;
+    public bool enableKeyboardTest = false;
 
     private Vector3 initialJawPosition;
-    private Transform originalWorkpieceParent;
+    private float targetJawX;
 
     private bool isClamping;
     private bool isReleasing;
     private bool isClamped;
 
-    private float targetJawX;
+    public bool IsClamped => isClamped;
+    public bool IsBusy => isClamping || isReleasing;
 
     private void Start()
     {
-        if (movingJaw != null)
-            initialJawPosition = movingJaw.localPosition;
+        if (viseRoot == null || movingJaw == null ||
+            workpiece == null || movingJawPlate == null ||
+            fixedJawPlate == null || workpieceCollider == null)
+        {
+            Debug.LogError("ViseController: Missing Inspector references!");
+            enabled = false;
+            return;
+        }
 
-        if (workpiece != null)
-            originalWorkpieceParent = workpiece.parent;
+        if (workpieceBody == null)
+            workpieceBody = workpiece.GetComponent<Rigidbody>();
+
+        if (workpieceBody == null)
+        {
+            Debug.LogError("ViseController: Workpiece Rigidbody missing!");
+            enabled = false;
+            return;
+        }
+
+        initialJawPosition = movingJaw.localPosition;
     }
 
     private void Update()
@@ -60,53 +79,55 @@ public class ViseController : MonoBehaviour
 
     public void ClampWorkpiece()
     {
-        if (isClamping || isClamped || isReleasing)
+        if (IsBusy || isClamped)
             return;
 
-        if (!ReferencesValid())
+        if (magnetController != null &&
+            (!magnetController.IsSnapped || magnetController.IsSnapping))
+        {
+            Debug.LogWarning("Vise: workpiece is not positioned by magnet.");
             return;
+        }
 
-        // Find the fixed jaw inner face.
+        // Lock the workpiece during clamping.
+        workpieceBody.linearVelocity = Vector3.zero;
+        workpieceBody.angularVelocity = Vector3.zero;
+        workpieceBody.useGravity = false;
+        workpieceBody.isKinematic = true;
+
+        Physics.SyncTransforms();
+
         float fixedFace = GetLocalMinMax(fixedJawPlate.bounds).y;
-
-        // Find the workpiece bounds along local X.
         Vector2 partBounds = GetLocalMinMax(workpieceCollider.bounds);
 
-        // Move the workpiece against the fixed jaw.
         float alignmentOffset = fixedFace - partBounds.x;
 
-        Vector3 shift = transform.TransformVector(
-            new Vector3(alignmentOffset, 0f, 0f));
+        workpiece.position += viseRoot.TransformVector(
+            new Vector3(alignmentOffset, 0f, 0f)
+        );
 
-        workpiece.position += shift;
+        Physics.SyncTransforms();
 
-        // Recalculate workpiece bounds after positioning.
         partBounds = GetLocalMinMax(workpieceCollider.bounds);
-
-        // Find the inner face of the moving jaw.
         float movingFace = GetLocalMinMax(movingJawPlate.bounds).x;
 
-        // Move the jaw toward the workpiece.
-        targetJawX = movingJaw.localPosition.x
-                   + (partBounds.y + contactOffset - movingFace);
+        targetJawX = movingJaw.localPosition.x +
+            (partBounds.y + contactOffset - movingFace);
 
         isClamping = true;
 
-        Debug.Log("Vise: automatic centering and clamping started.");
+        Debug.Log("Vise: clamping started.");
     }
 
     public void ReleaseWorkpiece()
     {
-        if (!isClamped && !isClamping)
+        if (IsBusy || (!isClamped &&
+            (magnetController == null || !magnetController.IsSnapped)))
             return;
 
         isClamping = false;
         isClamped = false;
         isReleasing = true;
-
-        // Detach the workpiece while preserving its world position.
-        if (workpiece != null)
-            workpiece.SetParent(originalWorkpieceParent, true);
 
         Debug.Log("Vise: releasing workpiece.");
     }
@@ -116,9 +137,8 @@ public class ViseController : MonoBehaviour
         Vector3 p = movingJaw.localPosition;
 
         p.x = Mathf.MoveTowards(
-            p.x,
-            targetJawX,
-            jawSpeed * Time.deltaTime);
+            p.x, targetJawX, jawSpeed * Time.deltaTime
+        );
 
         movingJaw.localPosition = p;
 
@@ -130,9 +150,6 @@ public class ViseController : MonoBehaviour
             isClamping = false;
             isClamped = true;
 
-            // Attach workpiece to the vise, preserving its world position.
-            workpiece.SetParent(transform, true);
-
             Debug.Log("Vise: workpiece clamped.");
         }
     }
@@ -142,9 +159,8 @@ public class ViseController : MonoBehaviour
         Vector3 p = movingJaw.localPosition;
 
         p.x = Mathf.MoveTowards(
-            p.x,
-            initialJawPosition.x,
-            jawSpeed * Time.deltaTime);
+            p.x, initialJawPosition.x, jawSpeed * Time.deltaTime
+        );
 
         movingJaw.localPosition = p;
 
@@ -153,9 +169,19 @@ public class ViseController : MonoBehaviour
             p.x = initialJawPosition.x;
             movingJaw.localPosition = p;
 
+            // Keep the workpiece in its current world position.
+            // Do not change its parent or enable gravity.
+            workpieceBody.linearVelocity = Vector3.zero;
+            workpieceBody.angularVelocity = Vector3.zero;
+            workpieceBody.useGravity = false;
+            workpieceBody.isKinematic = true;
+
+            if (magnetController != null)
+                magnetController.ReleaseWorkpiece();
+
             isReleasing = false;
 
-            Debug.Log("Vise: jaw opened.");
+            Debug.Log("Vise: jaw opened, workpiece released and held in place.");
         }
     }
 
@@ -172,29 +198,12 @@ public class ViseController : MonoBehaviour
                 (i & 4) == 0 ? bounds.min.z : bounds.max.z
             );
 
-            float localX = transform.InverseTransformPoint(corner).x;
+            float localX = viseRoot.InverseTransformPoint(corner).x;
 
             min = Mathf.Min(min, localX);
             max = Mathf.Max(max, localX);
         }
 
         return new Vector2(min, max);
-    }
-
-    private bool ReferencesValid()
-    {
-        if (movingJaw == null ||
-            movingJawPlate == null ||
-            fixedJawPlate == null ||
-            workpiece == null ||
-            workpieceCollider == null)
-        {
-            Debug.LogError(
-                "ViseController: assign all references in Inspector.");
-
-            return false;
-        }
-
-        return true;
     }
 }

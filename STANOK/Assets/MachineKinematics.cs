@@ -14,6 +14,9 @@ public class MachineKinematics : MonoBehaviour
     [Header("Spindle")]
     public SpindleController spindleController;
 
+    [Header("Vise")]
+    public ViseController viseController;
+
     [Header("Movement Speed")]
     public float moveSpeed = 0.5f;
 
@@ -61,10 +64,11 @@ public class MachineKinematics : MonoBehaviour
     private Vector3 tableXStart;
     private Vector3 tableYStart;
 
-    private bool stopRequested = false;
-    private bool machineEnabled = true;
+    private bool stopRequested;
+    private bool machineEnabled;
+    private bool pendingStart;
 
-    void Start()
+    private void Start()
     {
         if (headZ == null || tableX == null || tableY == null)
         {
@@ -77,6 +81,8 @@ public class MachineKinematics : MonoBehaviour
         tableXStart = tableX.localPosition;
         tableYStart = tableY.localPosition;
 
+        machineEnabled = false;
+
         if (spindleController != null)
             spindleController.StopSpindle();
 
@@ -84,8 +90,36 @@ public class MachineKinematics : MonoBehaviour
         SetStandby();
     }
 
-    void Update()
+    private void Update()
     {
+        // Wait until the vise finishes clamping.
+        if (pendingStart)
+        {
+            if (stopRequested)
+            {
+                pendingStart = false;
+            }
+            else if (viseController != null &&
+                     viseController.IsClamped)
+            {
+                pendingStart = false;
+                machineEnabled = true;
+
+                if (spindleController != null)
+                    spindleController.StartSpindle();
+
+                Debug.Log(
+                    "Machine: clamping complete, machine started."
+                );
+            }
+            else
+            {
+                UpdateCoordinateDisplay();
+                SetStandby();
+                return;
+            }
+        }
+
         if (stopRequested || !machineEnabled)
         {
             if (stopRequested)
@@ -176,7 +210,7 @@ public class MachineKinematics : MonoBehaviour
             SetStandby();
     }
 
-    void UpdateCoordinateDisplay()
+    private void UpdateCoordinateDisplay()
     {
         float x = (tableX.localPosition.x - tableXStart.x)
                   * millimetersPerUnit;
@@ -197,7 +231,7 @@ public class MachineKinematics : MonoBehaviour
             coordinateZText.text = $"Z: {z:F1} мм";
     }
 
-    void SetMachineStatus(
+    private void SetMachineStatus(
         string label,
         Color32 background,
         Color32 foreground)
@@ -212,7 +246,7 @@ public class MachineKinematics : MonoBehaviour
             statusBadgeImage.color = background;
     }
 
-    void SetActive()
+    private void SetActive()
     {
         SetMachineStatus(
             "ACTIVE",
@@ -221,7 +255,7 @@ public class MachineKinematics : MonoBehaviour
         );
     }
 
-    void SetStandby()
+    private void SetStandby()
     {
         SetMachineStatus(
             "STAND BY",
@@ -230,7 +264,7 @@ public class MachineKinematics : MonoBehaviour
         );
     }
 
-    void SetStopVisual()
+    private void SetStopVisual()
     {
         SetMachineStatus(
             "STOP",
@@ -239,38 +273,90 @@ public class MachineKinematics : MonoBehaviour
         );
     }
 
+    public void ResumeMachine()
+    {
+        if (stopRequested || pendingStart)
+            return;
+
+        if (viseController == null)
+        {
+            Debug.LogError(
+                "Machine: Vise Controller is not assigned!"
+            );
+            return;
+        }
+
+        if (viseController.IsClamped)
+        {
+            machineEnabled = true;
+
+            if (spindleController != null)
+                spindleController.StartSpindle();
+
+            SetActive();
+            return;
+        }
+
+        if (viseController.magnetController == null ||
+            !viseController.magnetController.IsSnapped)
+        {
+            Debug.LogWarning(
+                "Machine: workpiece is not positioned in the vise."
+            );
+            return;
+        }
+
+        machineEnabled = false;
+
+        viseController.ClampWorkpiece();
+
+        if (viseController.IsBusy)
+        {
+            pendingStart = true;
+            SetStandby();
+        }
+        else if (viseController.IsClamped)
+        {
+            machineEnabled = true;
+
+            if (spindleController != null)
+                spindleController.StartSpindle();
+        }
+        else
+        {
+            Debug.LogWarning(
+                "Machine: vise could not start clamping."
+            );
+        }
+    }
+
     public void StopMachine()
     {
+        pendingStart = false;
         stopRequested = true;
         machineEnabled = false;
 
         if (spindleController != null)
             spindleController.StopSpindle();
 
+        // The vise remains clamped.
         SetStopVisual();
     }
 
     public void ResetMachine()
     {
+        pendingStart = false;
         stopRequested = false;
         machineEnabled = false;
 
         if (spindleController != null)
             spindleController.StopSpindle();
 
-        SetStandby();
-    }
-
-    public void ResumeMachine()
-    {
-        if (stopRequested)
-            return;
-
-        machineEnabled = true;
-
-        if (spindleController != null)
-            spindleController.StartSpindle();
+        if (viseController != null)
+            viseController.ReleaseWorkpiece();
 
         SetStandby();
+
+        Debug.Log("Machine: reset, vise release requested.");
     }
 }

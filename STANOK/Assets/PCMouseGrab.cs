@@ -1,78 +1,177 @@
 
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 public class PCMouseGrab : MonoBehaviour
 {
+    [Header("Camera")]
     public Camera playerCamera;
-    public Transform holdPoint;
-    public float grabDistance = 3f;
-    public float throwMultiplier = 1.2f;
+
+    [Header("Interaction")]
+    public float grabDistance = 15f;
+    public float grabRadius = 0.6f;
+
+    [Header("Object Movement")]
+    public float holdDistance = 1.5f;
+    public float minHoldDistance = 0.5f;
+    public float maxHoldDistance = 4f;
+    public float wheelSensitivity = 0.5f;
+
+    [Header("Machine Interaction")]
+    public ViseController viseController;
+    public ViseMagnetController magnetController;
 
     private Rigidbody rb;
-    private Transform originalParent;
-    private bool isHeld;
-    private Vector3 holdVelocity;
-    private Vector3 previousHoldPosition;
+    private Collider[] workpieceColliders;
 
-    void Awake()
+    private bool isHeld;
+    private Quaternion heldRotation;
+    private float currentDistance;
+
+    private void Awake()
     {
         rb = GetComponent<Rigidbody>();
+        workpieceColliders = GetComponentsInChildren<Collider>();
+
+        if (rb == null)
+        {
+            Debug.LogError("PCMouseGrab: Rigidbody missing!");
+            enabled = false;
+            return;
+        }
+
+        if (playerCamera == null)
+            Debug.LogError("PCMouseGrab: Player Camera missing!");
     }
 
-    void Update()
+    private void Update()
     {
-        if (Input.GetMouseButtonDown(0) && !isHeld)
+        if (Mouse.current == null || playerCamera == null)
+            return;
+
+        if (!isHeld && Mouse.current.leftButton.wasPressedThisFrame)
             TryGrab();
 
         if (isHeld)
         {
-            holdVelocity = (holdPoint.position -
-                previousHoldPosition) / Mathf.Max(Time.deltaTime, 0.001f);
+            UpdateHeldPosition();
 
-            previousHoldPosition = holdPoint.position;
-
-            if (Input.GetMouseButtonUp(0))
+            if (Mouse.current.leftButton.wasReleasedThisFrame)
                 Release();
         }
     }
 
-    void TryGrab()
+    private void TryGrab()
     {
-        Ray ray = playerCamera.ScreenPointToRay(
-            Input.mousePosition);
-
-        if (Physics.Raycast(ray, out RaycastHit hit, grabDistance))
+        if (viseController != null &&
+            (viseController.IsClamped || viseController.IsBusy))
         {
-            if (hit.rigidbody == rb)
-                Grab();
+            Debug.LogWarning("PCMouseGrab: Vise is busy or clamped.");
+            return;
         }
+
+        Ray ray = playerCamera.ScreenPointToRay(
+            Mouse.current.position.ReadValue()
+        );
+
+        Physics.SyncTransforms();
+
+        float bestDistance = float.PositiveInfinity;
+        bool found = false;
+
+        foreach (Collider col in workpieceColliders)
+        {
+            if (col == null || !col.enabled || !col.gameObject.activeInHierarchy)
+                continue;
+
+            // Find the closest point on the actual workpiece collider
+            // to the mouse ray.
+            Vector3 toCenter = col.bounds.center - ray.origin;
+            float alongRay = Vector3.Dot(toCenter, ray.direction);
+
+            if (alongRay < 0f || alongRay > grabDistance)
+                continue;
+
+            Vector3 rayPoint = ray.GetPoint(alongRay);
+            Vector3 closestPoint = col.ClosestPoint(rayPoint);
+
+            float distanceFromRay = Vector3.Distance(
+                rayPoint, closestPoint
+            );
+
+            if (distanceFromRay <= grabRadius && alongRay < bestDistance)
+            {
+                bestDistance = alongRay;
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            Debug.LogWarning("PCMouseGrab: Workpiece is outside grab area.");
+            return;
+        }
+
+        Debug.Log($"PCMouseGrab: Workpiece found at {bestDistance:F2} m.");
+        Grab();
     }
 
-    void Grab()
+    private void Grab()
     {
-        originalParent = transform.parent;
+        rb.linearVelocity = Vector3.zero;
+        rb.angularVelocity = Vector3.zero;
 
-        rb.isKinematic = true;
         rb.useGravity = false;
+        rb.isKinematic = true;
 
-        transform.SetParent(holdPoint);
-        transform.localPosition = Vector3.zero;
-        transform.localRotation = Quaternion.identity;
+        if (magnetController != null)
+            magnetController.NotifyPickedUp();
 
-        holdVelocity = Vector3.zero;
-        previousHoldPosition = holdPoint.position;
+        currentDistance = Mathf.Clamp(
+            holdDistance, minHoldDistance, maxHoldDistance
+        );
+
+        heldRotation = transform.rotation;
         isHeld = true;
+
+        Debug.Log("PCMouseGrab: WORKPIECE PICKED UP!");
     }
 
-    void Release()
+    private void UpdateHeldPosition()
     {
-        transform.SetParent(originalParent, true);
+        float scroll = Mouse.current.scroll.ReadValue().y;
 
-        rb.isKinematic = false;
-        rb.useGravity = true;
+        currentDistance -= scroll * wheelSensitivity * 0.01f;
 
-        rb.linearVelocity = holdVelocity * throwMultiplier;
+        currentDistance = Mathf.Clamp(
+            currentDistance, minHoldDistance, maxHoldDistance
+        );
 
+        Ray ray = playerCamera.ScreenPointToRay(
+            Mouse.current.position.ReadValue()
+        );
+
+        rb.position = ray.GetPoint(currentDistance);
+        rb.rotation = heldRotation;
+    }
+
+    private void Release()
+    {
         isHeld = false;
+
+        if (magnetController != null)
+        {
+            magnetController.NotifyDropped();
+        }
+        else
+        {
+            rb.isKinematic = false;
+            rb.useGravity = true;
+        }
+
+        rb.linearVelocity = Vector3.zero;
+        rb.angularVelocity = Vector3.zero;
+
+        Debug.Log("PCMouseGrab: WORKPIECE RELEASED!");
     }
 }

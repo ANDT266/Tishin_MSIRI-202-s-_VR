@@ -15,11 +15,13 @@ public class ViseMagnetController : MonoBehaviour
     [Min(0.01f)]
     public float snapDuration = 0.3f;
 
+    [Min(0.01f)]
+    public float detectionRadius = 0.5f;
+
     private bool isSnapping;
     private bool isSnapped;
-    private bool mustExitBeforeSnap;
+    private bool isHeld;
 
-    private Transform originalParent;
     private Coroutine snapRoutine;
 
     public bool IsSnapped => isSnapped;
@@ -27,22 +29,42 @@ public class ViseMagnetController : MonoBehaviour
 
     private void Awake()
     {
-        if (workpiece != null)
-            originalParent = workpiece.parent;
+        if (workpieceBody == null && workpiece != null)
+            workpieceBody = workpiece.GetComponent<Rigidbody>();
+    }
+
+    private void OnTriggerEnter(Collider other)
+    {
+        TrySnap(other);
     }
 
     private void OnTriggerStay(Collider other)
     {
-        if (workpieceBody == null || loadingPoint == null)
+        TrySnap(other);
+    }
+
+    private void TrySnap(Collider other)
+    {
+        if (workpiece == null ||
+            workpieceBody == null ||
+            loadingPoint == null)
             return;
 
         if (other.attachedRigidbody != workpieceBody)
             return;
 
-        if (isSnapping || isSnapped || mustExitBeforeSnap)
+        if (isSnapping || isSnapped || isHeld)
             return;
 
         if (workpieceBody.isKinematic)
+            return;
+
+        float distance = Vector3.Distance(
+            workpiece.position,
+            transform.position
+        );
+
+        if (distance > detectionRadius)
             return;
 
         snapRoutine = StartCoroutine(SnapWorkpiece());
@@ -54,7 +76,6 @@ public class ViseMagnetController : MonoBehaviour
 
         workpieceBody.linearVelocity = Vector3.zero;
         workpieceBody.angularVelocity = Vector3.zero;
-
         workpieceBody.useGravity = false;
         workpieceBody.isKinematic = true;
 
@@ -70,14 +91,23 @@ public class ViseMagnetController : MonoBehaviour
         {
             elapsed += Time.deltaTime;
 
-            float t = Mathf.Clamp01(elapsed / snapDuration);
-            t = Mathf.SmoothStep(0f, 1f, t);
+            float t = Mathf.SmoothStep(
+                0f,
+                1f,
+                Mathf.Clamp01(elapsed / snapDuration)
+            );
 
-            workpiece.position =
-                Vector3.Lerp(startPosition, targetPosition, t);
+            workpiece.position = Vector3.Lerp(
+                startPosition,
+                targetPosition,
+                t
+            );
 
-            workpiece.rotation =
-                Quaternion.Slerp(startRotation, targetRotation, t);
+            workpiece.rotation = Quaternion.Slerp(
+                startRotation,
+                targetRotation,
+                t
+            );
 
             yield return null;
         }
@@ -85,8 +115,8 @@ public class ViseMagnetController : MonoBehaviour
         workpiece.position = targetPosition;
         workpiece.rotation = targetRotation;
 
-        workpieceBody.linearVelocity = Vector3.zero;
-        workpieceBody.angularVelocity = Vector3.zero;
+        workpieceBody.isKinematic = true;
+        workpieceBody.useGravity = false;
 
         isSnapping = false;
         isSnapped = true;
@@ -95,30 +125,40 @@ public class ViseMagnetController : MonoBehaviour
         Debug.Log("Vise Magnet: workpiece positioned.");
     }
 
-    private void Update()
+    public void NotifyPickedUp()
     {
-        if (!isSnapped || workpiece == null)
-            return;
-
-        // Detect pickup by mouse or VR parenting.
-        if (workpiece.parent != transform.parent)
+        if (snapRoutine != null)
         {
-            isSnapped = false;
-            mustExitBeforeSnap = true;
-
-            Debug.Log("Vise Magnet: workpiece picked up.");
+            StopCoroutine(snapRoutine);
+            snapRoutine = null;
         }
+
+        isSnapping = false;
+        isSnapped = false;
+        isHeld = true;
+
+        Debug.Log("Vise Magnet: pickup registered.");
     }
 
-    private void OnTriggerExit(Collider other)
+    public void NotifyDropped()
     {
-        if (workpieceBody == null)
-            return;
+        isHeld = false;
+        isSnapping = false;
+        isSnapped = false;
 
-        if (other.attachedRigidbody == workpieceBody)
+        if (workpieceBody != null)
         {
-            mustExitBeforeSnap = false;
+            if (workpieceBody.isKinematic)
+            {
+                workpieceBody.linearVelocity = Vector3.zero;
+                workpieceBody.angularVelocity = Vector3.zero;
+            }
+
+            workpieceBody.isKinematic = false;
+            workpieceBody.useGravity = true;
         }
+
+        Debug.Log("Vise Magnet: workpiece dropped.");
     }
 
     public void ReleaseWorkpiece()
@@ -131,14 +171,18 @@ public class ViseMagnetController : MonoBehaviour
 
         isSnapping = false;
         isSnapped = false;
-        mustExitBeforeSnap = true;
+        isHeld = false;
 
         if (workpieceBody != null)
         {
+            if (workpieceBody.isKinematic)
+            {
+                workpieceBody.linearVelocity = Vector3.zero;
+                workpieceBody.angularVelocity = Vector3.zero;
+            }
+
             workpieceBody.isKinematic = false;
             workpieceBody.useGravity = true;
-            workpieceBody.linearVelocity = Vector3.zero;
-            workpieceBody.angularVelocity = Vector3.zero;
         }
 
         Debug.Log("Vise Magnet: workpiece released.");
